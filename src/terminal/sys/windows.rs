@@ -6,7 +6,10 @@ use std::io::{self};
 use crossterm_winapi::{Console, ConsoleMode, Coord, Handle, ScreenBuffer, Size};
 use winapi::{
     shared::minwindef::DWORD,
-    um::wincon::{SetConsoleTitleW, ENABLE_ECHO_INPUT, ENABLE_LINE_INPUT, ENABLE_PROCESSED_INPUT},
+    um::wincon::{
+        SetConsoleTitleW, ENABLE_ECHO_INPUT, ENABLE_LINE_INPUT, ENABLE_PROCESSED_INPUT,
+        ENABLE_VIRTUAL_TERMINAL_INPUT,
+    },
 };
 
 use crate::{
@@ -16,6 +19,30 @@ use crate::{
 
 /// bits which can't be set in raw mode
 const NOT_RAW_MODE_MASK: DWORD = ENABLE_LINE_INPUT | ENABLE_ECHO_INPUT | ENABLE_PROCESSED_INPUT;
+
+/// Whether the environment says we're running under a VT terminal that
+/// implements the kitty keyboard protocol (Alacritty, kitty, WezTerm).
+///
+/// Under ConPTY, in-band capability queries are useless: conhost intercepts
+/// and answers `CSI ? u` (kitty query), DA1, and XTVERSION itself, so the
+/// real terminal never sees them (verified empirically on Windows 11 /
+/// Alacritty 0.17). The terminal's exported environment is the only signal
+/// that survives. Misdetection is benign: pushing kitty flags at a terminal
+/// that doesn't speak the protocol is an ignored escape sequence, and
+/// legacy VT bytes still parse — the worst case is numpad keys arriving as
+/// plain digits, which is exactly the status quo.
+pub(crate) fn env_declares_kitty_terminal() -> bool {
+    const MARKERS: &[&str] = &[
+        "ALACRITTY_WINDOW_ID",
+        "ALACRITTY_LOG", // the one Alacritty exports on Windows (verified)
+        "ALACRITTY_SOCKET",
+        "KITTY_WINDOW_ID",
+        "KITTY_PID",
+        "WEZTERM_PANE",
+        "WEZTERM_EXECUTABLE",
+    ];
+    MARKERS.iter().any(|name| std::env::var_os(name).is_some())
+}
 
 pub(crate) fn is_raw_mode_enabled() -> std::io::Result<bool> {
     let console_mode = ConsoleMode::from(Handle::current_in_handle()?);
@@ -33,7 +60,13 @@ pub(crate) fn enable_raw_mode() -> std::io::Result<()> {
 
     let dw_mode = console_mode.mode()?;
 
-    let new_mode = dw_mode & !NOT_RAW_MODE_MASK;
+    let mut new_mode = dw_mode & !NOT_RAW_MODE_MASK;
+    // Under a kitty-capable VT terminal, receive input as the raw escape
+    // byte stream (parsed by the shared ANSI parser) instead of ConPTY's
+    // re-synthesized key records, which erase keypad identity.
+    if env_declares_kitty_terminal() {
+        new_mode |= ENABLE_VIRTUAL_TERMINAL_INPUT;
+    }
 
     console_mode.set_mode(new_mode)?;
 
@@ -45,7 +78,7 @@ pub(crate) fn disable_raw_mode() -> std::io::Result<()> {
 
     let dw_mode = console_mode.mode()?;
 
-    let new_mode = dw_mode | NOT_RAW_MODE_MASK;
+    let new_mode = (dw_mode | NOT_RAW_MODE_MASK) & !ENABLE_VIRTUAL_TERMINAL_INPUT;
 
     console_mode.set_mode(new_mode)?;
 
@@ -70,10 +103,15 @@ pub(crate) fn window_size() -> io::Result<WindowSize> {
 
 /// Queries the terminal's support for progressive keyboard enhancement.
 ///
-/// This always returns `Ok(false)` on Windows.
+/// On Windows this cannot be an in-band query: conhost answers `CSI ? u`
+/// itself and the real terminal never sees it. Instead this reports whether
+/// the environment identifies a kitty-capable VT terminal (Alacritty,
+/// kitty, WezTerm) — see `env_declares_kitty_terminal`. Windows Terminal
+/// and plain conhost report `false`; their `VK_NUMPAD` records already
+/// carry keypad identity without the protocol.
 #[cfg(feature = "events")]
 pub fn supports_keyboard_enhancement() -> std::io::Result<bool> {
-    Ok(false)
+    Ok(env_declares_kitty_terminal())
 }
 
 pub(crate) fn clear(clear_type: ClearType) -> std::io::Result<()> {

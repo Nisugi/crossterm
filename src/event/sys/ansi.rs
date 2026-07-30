@@ -19,6 +19,20 @@ use crate::event::internal::InternalEvent;
 // Ok(Some(event)) -> we have event, clear the buffer
 //
 
+/// Raw-mode state, papering over the platform signature difference (unix
+/// returns bool, windows io::Result<bool>). Windows errors read as "raw"
+/// so newline keeps its raw-mode meaning.
+fn raw_mode_enabled() -> bool {
+    #[cfg(unix)]
+    {
+        crate::terminal::sys::is_raw_mode_enabled()
+    }
+    #[cfg(windows)]
+    {
+        crate::terminal::sys::is_raw_mode_enabled().unwrap_or(true)
+    }
+}
+
 fn could_not_parse_event_error() -> io::Error {
     io::Error::new(io::ErrorKind::Other, "Could not parse an event.")
 }
@@ -126,7 +140,7 @@ pub(crate) fn parse_event(
         // newlines as input is because the terminal converts \r into \n for us. When we
         // enter raw mode, we disable that, so \n no longer has any meaning - it's better to
         // use Ctrl+J. Waiting to handle it here means it gets picked up later
-        b'\n' if !crate::terminal::sys::is_raw_mode_enabled() => Ok(Some(InternalEvent::Event(
+        b'\n' if !raw_mode_enabled() => Ok(Some(InternalEvent::Event(
             Event::Key(KeyCode::Enter.into()),
         ))),
         b'\t' => Ok(Some(InternalEvent::Event(Event::Key(KeyCode::Tab.into())))),
@@ -579,7 +593,7 @@ pub(crate) fn parse_csi_u_encoded_key_code(buffer: &[u8]) -> io::Result<Option<I
                     // newlines as input is because the terminal converts \r into \n for us. When we
                     // enter raw mode, we disable that, so \n no longer has any meaning - it's better to
                     // use Ctrl+J. Waiting to handle it here means it gets picked up later
-                    '\n' if !crate::terminal::sys::is_raw_mode_enabled() => KeyCode::Enter,
+                    '\n' if !raw_mode_enabled() => KeyCode::Enter,
                     '\t' => {
                         if modifiers.contains(KeyModifiers::SHIFT) {
                             KeyCode::BackTab

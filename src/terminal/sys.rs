@@ -10,6 +10,8 @@ pub(crate) use self::unix::{
 #[cfg(windows)]
 #[cfg(feature = "events")]
 pub use self::windows::supports_keyboard_enhancement;
+#[cfg(windows)]
+pub(crate) use self::windows::env_declares_kitty_terminal;
 #[cfg(all(windows, test))]
 pub(crate) use self::windows::temp_screen_buffer;
 #[cfg(windows)]
