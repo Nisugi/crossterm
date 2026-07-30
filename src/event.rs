@@ -230,7 +230,6 @@ pub fn poll(timeout: Duration) -> std::io::Result<bool> {
 pub fn read() -> std::io::Result<Event> {
     match internal::read(&EventFilter)? {
         InternalEvent::Event(event) => Ok(event),
-        #[cfg(unix)]
         _ => unreachable!(),
     }
 }
@@ -260,7 +259,6 @@ pub fn try_read() -> Option<Event> {
     match internal::try_read(&EventFilter) {
         Some(InternalEvent::Event(event)) => Some(event),
         None => None,
-        #[cfg(unix)]
         _ => unreachable!(),
     }
 }
@@ -529,7 +527,10 @@ impl Command for PushKeyboardEnhancementFlags {
 
     #[cfg(windows)]
     fn is_ansi_code_supported(&self) -> bool {
-        false
+        // Under a kitty-capable VT terminal behind ConPTY the ANSI form is
+        // exactly what must reach the terminal (there is no WinAPI
+        // equivalent); everywhere else keep the explicit unsupported error.
+        crate::terminal::sys::env_declares_kitty_terminal() && crate::ansi_support::supports_ansi()
     }
 }
 
@@ -558,7 +559,10 @@ impl Command for PopKeyboardEnhancementFlags {
 
     #[cfg(windows)]
     fn is_ansi_code_supported(&self) -> bool {
-        false
+        // Under a kitty-capable VT terminal behind ConPTY the ANSI form is
+        // exactly what must reach the terminal (there is no WinAPI
+        // equivalent); everywhere else keep the explicit unsupported error.
+        crate::terminal::sys::env_declares_kitty_terminal() && crate::ansi_support::supports_ansi()
     }
 }
 
