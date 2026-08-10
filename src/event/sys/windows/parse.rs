@@ -1,16 +1,16 @@
 use crossterm_winapi::{ControlKeyState, EventFlags, KeyEventRecord, ScreenBuffer};
 use winapi::um::{
     wincon::{
-        CAPSLOCK_ON, LEFT_ALT_PRESSED, LEFT_CTRL_PRESSED, RIGHT_ALT_PRESSED, RIGHT_CTRL_PRESSED,
-        SHIFT_PRESSED,
+        CAPSLOCK_ON, ENHANCED_KEY, LEFT_ALT_PRESSED, LEFT_CTRL_PRESSED, RIGHT_ALT_PRESSED,
+        RIGHT_CTRL_PRESSED, SHIFT_PRESSED,
     },
     winuser::{
         GetForegroundWindow, GetKeyboardLayout, GetWindowThreadProcessId, ToUnicodeEx, VK_ADD,
-        VK_BACK, VK_CONTROL, VK_DECIMAL, VK_DELETE, VK_DIVIDE, VK_DOWN, VK_END, VK_ESCAPE, VK_F1,
-        VK_F24, VK_HOME, VK_INSERT, VK_LEFT, VK_MENU, VK_MULTIPLY, VK_NEXT, VK_NUMPAD0, VK_NUMPAD1,
-        VK_NUMPAD2, VK_NUMPAD3, VK_NUMPAD4, VK_NUMPAD5, VK_NUMPAD6, VK_NUMPAD7, VK_NUMPAD8,
-        VK_NUMPAD9, VK_PRIOR, VK_RETURN, VK_RIGHT, VK_SEPARATOR, VK_SHIFT, VK_SUBTRACT, VK_TAB,
-        VK_UP,
+        VK_BACK, VK_CLEAR, VK_CONTROL, VK_DECIMAL, VK_DELETE, VK_DIVIDE, VK_DOWN, VK_END,
+        VK_ESCAPE, VK_F1, VK_F24, VK_HOME, VK_INSERT, VK_LEFT, VK_MENU, VK_MULTIPLY, VK_NEXT,
+        VK_NUMPAD0, VK_NUMPAD1, VK_NUMPAD2, VK_NUMPAD3, VK_NUMPAD4, VK_NUMPAD5, VK_NUMPAD6,
+        VK_NUMPAD7, VK_NUMPAD8, VK_NUMPAD9, VK_PRIOR, VK_RETURN, VK_RIGHT, VK_SEPARATOR, VK_SHIFT,
+        VK_SUBTRACT, VK_TAB, VK_UP,
     },
 };
 
@@ -203,6 +203,34 @@ fn get_char_for_key(key_event: &KeyEventRecord) -> Option<char> {
     Some(ch)
 }
 
+/// Recovers the numpad identity of a navigation virtual-key code.
+///
+/// Windows reports numpad keys as navigation keys (`VK_HOME`, `VK_UP`, …) in two
+/// situations: when `NumLock` is off, and — regardless of `NumLock` — when Shift is
+/// held, because Shift temporarily overrides `NumLock`. In both cases only the
+/// virtual-key code is rewritten; the scancode is untouched, and the console reports
+/// the physical origin through the `ENHANCED_KEY` flag.
+///
+/// The dedicated navigation block sets `ENHANCED_KEY`; the numpad does not. So a
+/// navigation VK *without* `ENHANCED_KEY` came from the numpad and can be mapped back
+/// to its `Keypad*` code, which is what makes `Shift`+numpad bindable.
+fn numpad_keycode_from_navigation_vk(virtual_key_code: i32) -> Option<KeyCode> {
+    match virtual_key_code {
+        VK_INSERT => Some(KeyCode::Keypad0),
+        VK_END => Some(KeyCode::Keypad1),
+        VK_DOWN => Some(KeyCode::Keypad2),
+        VK_NEXT => Some(KeyCode::Keypad3),
+        VK_LEFT => Some(KeyCode::Keypad4),
+        VK_CLEAR => Some(KeyCode::Keypad5),
+        VK_RIGHT => Some(KeyCode::Keypad6),
+        VK_HOME => Some(KeyCode::Keypad7),
+        VK_UP => Some(KeyCode::Keypad8),
+        VK_PRIOR => Some(KeyCode::Keypad9),
+        VK_DELETE => Some(KeyCode::KeypadPeriod),
+        _ => None,
+    }
+}
+
 fn parse_key_event_record(key_event: &KeyEventRecord) -> Option<WindowsKeyEvent> {
     let modifiers = KeyModifiers::from(&key_event.control_key_state);
     let virtual_key_code = key_event.virtual_key_code as i32;
@@ -239,6 +267,23 @@ fn parse_key_event_record(key_event: &KeyEventRecord) -> Option<WindowsKeyEvent>
         && !modifiers.contains(KeyModifiers::SHIFT | KeyModifiers::CONTROL);
     if is_only_alt_modifier && is_numpad_numeric_key {
         return None;
+    }
+
+    // A navigation virtual-key code that did *not* come from the dedicated navigation
+    // block was produced by the numpad — either because NumLock is off or because Shift
+    // temporarily overrode NumLock. Recover the physical key so it stays bindable.
+    let is_enhanced_key = key_event.control_key_state.has_state(ENHANCED_KEY);
+    if !is_enhanced_key {
+        if let Some(key_code) = numpad_keycode_from_navigation_vk(virtual_key_code) {
+            let kind = if key_event.key_down {
+                KeyEventKind::Press
+            } else {
+                KeyEventKind::Release
+            };
+            return Some(WindowsKeyEvent::KeyEvent(KeyEvent::new_with_kind(
+                key_code, modifiers, kind,
+            )));
+        }
     }
 
     let parse_result = match virtual_key_code {
@@ -393,4 +438,69 @@ fn parse_mouse_event_record(
         row: ypos,
         modifiers,
     }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Windows rewrites the virtual-key code of numpad keys to their navigation twins
+    /// when NumLock is off, and — regardless of NumLock — when Shift is held, because
+    /// Shift temporarily overrides NumLock. Only `ENHANCED_KEY` distinguishes those
+    /// from the real navigation block, so every navigation VK must map back.
+    #[test]
+    fn navigation_vks_recover_their_numpad_identity() {
+        let cases = [
+            (VK_INSERT, KeyCode::Keypad0),
+            (VK_END, KeyCode::Keypad1),
+            (VK_DOWN, KeyCode::Keypad2),
+            (VK_NEXT, KeyCode::Keypad3),
+            (VK_LEFT, KeyCode::Keypad4),
+            (VK_CLEAR, KeyCode::Keypad5),
+            (VK_RIGHT, KeyCode::Keypad6),
+            (VK_HOME, KeyCode::Keypad7),
+            (VK_UP, KeyCode::Keypad8),
+            (VK_PRIOR, KeyCode::Keypad9),
+            (VK_DELETE, KeyCode::KeypadPeriod),
+        ];
+
+        for (vk, expected) in cases {
+            assert_eq!(
+                numpad_keycode_from_navigation_vk(vk),
+                Some(expected),
+                "virtual key {vk} should recover to {expected:?}"
+            );
+        }
+    }
+
+    /// `VK_CLEAR` is numpad-5 with NumLock off. It has no navigation-block twin, so it
+    /// would otherwise be dropped entirely and the key would do nothing.
+    #[test]
+    fn numpad_five_is_recovered() {
+        assert_eq!(
+            numpad_keycode_from_navigation_vk(VK_CLEAR),
+            Some(KeyCode::Keypad5)
+        );
+    }
+
+    /// Keys that never shadow a numpad key must not be rewritten.
+    #[test]
+    fn non_navigation_vks_are_not_remapped() {
+        for vk in [VK_RETURN, VK_TAB, VK_ESCAPE, VK_BACK, VK_F1, VK_SHIFT] {
+            assert_eq!(
+                numpad_keycode_from_navigation_vk(vk),
+                None,
+                "virtual key {vk} must not be treated as a numpad key"
+            );
+        }
+    }
+
+    /// The numeric VKs are already unambiguous and handled by the main match; they must
+    /// not also appear in the navigation-recovery table or they'd be mapped twice.
+    #[test]
+    fn numeric_numpad_vks_are_not_in_the_recovery_table() {
+        for vk in [VK_NUMPAD0, VK_NUMPAD5, VK_NUMPAD9, VK_ADD, VK_DECIMAL] {
+            assert_eq!(numpad_keycode_from_navigation_vk(vk), None);
+        }
+    }
 }
