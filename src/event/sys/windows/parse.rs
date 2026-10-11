@@ -1,21 +1,23 @@
 use crossterm_winapi::{ControlKeyState, EventFlags, KeyEventRecord, ScreenBuffer};
 use winapi::um::{
     wincon::{
-        CAPSLOCK_ON, ENHANCED_KEY, LEFT_ALT_PRESSED, LEFT_CTRL_PRESSED, RIGHT_ALT_PRESSED,
-        RIGHT_CTRL_PRESSED, SHIFT_PRESSED,
+        CAPSLOCK_ON, ENHANCED_KEY, LEFT_ALT_PRESSED, LEFT_CTRL_PRESSED, NUMLOCK_ON,
+        RIGHT_ALT_PRESSED, RIGHT_CTRL_PRESSED, SHIFT_PRESSED,
     },
     winuser::{
         GetForegroundWindow, GetKeyboardLayout, GetWindowThreadProcessId, ToUnicodeEx, VK_ADD,
-        VK_BACK, VK_CLEAR, VK_CONTROL, VK_DECIMAL, VK_DELETE, VK_DIVIDE, VK_DOWN, VK_END,
-        VK_ESCAPE, VK_F1, VK_F24, VK_HOME, VK_INSERT, VK_LEFT, VK_MENU, VK_MULTIPLY, VK_NEXT,
-        VK_NUMPAD0, VK_NUMPAD1, VK_NUMPAD2, VK_NUMPAD3, VK_NUMPAD4, VK_NUMPAD5, VK_NUMPAD6,
-        VK_NUMPAD7, VK_NUMPAD8, VK_NUMPAD9, VK_PRIOR, VK_RETURN, VK_RIGHT, VK_SEPARATOR, VK_SHIFT,
-        VK_SUBTRACT, VK_TAB, VK_UP,
+        VK_APPS, VK_BACK, VK_CAPITAL, VK_CLEAR, VK_CONTROL, VK_DECIMAL, VK_DELETE, VK_DIVIDE,
+        VK_DOWN, VK_END, VK_ESCAPE, VK_F1, VK_F24, VK_HOME, VK_INSERT, VK_LEFT, VK_MENU,
+        VK_MULTIPLY, VK_NEXT, VK_NUMLOCK, VK_NUMPAD0, VK_NUMPAD1, VK_NUMPAD2, VK_NUMPAD3,
+        VK_NUMPAD4, VK_NUMPAD5, VK_NUMPAD6, VK_NUMPAD7, VK_NUMPAD8, VK_NUMPAD9, VK_PAUSE, VK_PRIOR,
+        VK_RETURN, VK_RIGHT, VK_SCROLL, VK_SEPARATOR, VK_SHIFT, VK_SNAPSHOT, VK_SUBTRACT, VK_TAB,
+        VK_UP,
     },
 };
 
 use crate::event::{
-    Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
+    Event, KeyCode, KeyEvent, KeyEventKind, KeyEventState, KeyModifiers, MouseButton, MouseEvent,
+    MouseEventKind,
 };
 
 #[derive(Default)]
@@ -56,7 +58,13 @@ pub(crate) fn handle_key_event(
         WindowsKeyEvent::Surrogate(new_surrogate) => {
             let ch = handle_surrogate(surrogate_buffer, new_surrogate)?;
             let modifiers = KeyModifiers::from(&key_event.control_key_state);
-            let key_event = KeyEvent::new(KeyCode::Char(ch), modifiers);
+            let state = KeyEventState::from(&key_event.control_key_state);
+            let key_event = KeyEvent::new_with_kind_and_state(
+                KeyCode::Char(ch),
+                modifiers,
+                KeyEventKind::Press,
+                state,
+            );
             Some(Event::Key(key_event))
         }
     }
@@ -97,6 +105,23 @@ impl From<&ControlKeyState> for KeyModifiers {
         }
 
         modifier
+    }
+}
+
+/// The lock keys' states the console reports with every key event, as the kitty keyboard
+/// protocol reports them: `NUMLOCK_ON` and `CAPSLOCK_ON`.
+impl From<&ControlKeyState> for KeyEventState {
+    fn from(state: &ControlKeyState) -> Self {
+        let mut lock_state = KeyEventState::empty();
+
+        if state.has_state(NUMLOCK_ON) {
+            lock_state |= KeyEventState::NUM_LOCK;
+        }
+        if state.has_state(CAPSLOCK_ON) {
+            lock_state |= KeyEventState::CAPS_LOCK;
+        }
+
+        lock_state
     }
 }
 
@@ -233,6 +258,7 @@ fn numpad_keycode_from_navigation_vk(virtual_key_code: i32) -> Option<KeyCode> {
 
 fn parse_key_event_record(key_event: &KeyEventRecord) -> Option<WindowsKeyEvent> {
     let modifiers = KeyModifiers::from(&key_event.control_key_state);
+    let state = KeyEventState::from(&key_event.control_key_state);
     let virtual_key_code = key_event.virtual_key_code as i32;
 
     // We normally ignore all key release events, but we will make an exception for an Alt key
@@ -255,7 +281,7 @@ fn parse_key_event_record(key_event: &KeyEventRecord) -> Option<WindowsKeyEvent>
                 } else {
                     KeyEventKind::Release
                 };
-                let key_event = KeyEvent::new_with_kind(key_code, modifiers, kind);
+                let key_event = KeyEvent::new_with_kind_and_state(key_code, modifiers, kind, state);
                 return Some(WindowsKeyEvent::KeyEvent(key_event));
             }
         }
@@ -280,9 +306,9 @@ fn parse_key_event_record(key_event: &KeyEventRecord) -> Option<WindowsKeyEvent>
             } else {
                 KeyEventKind::Release
             };
-            return Some(WindowsKeyEvent::KeyEvent(KeyEvent::new_with_kind(
-                key_code, modifiers, kind,
-            )));
+            return Some(WindowsKeyEvent::KeyEvent(
+                KeyEvent::new_with_kind_and_state(key_code, modifiers, kind, state),
+            ));
         }
     }
 
@@ -320,6 +346,14 @@ fn parse_key_event_record(key_event: &KeyEventRecord) -> Option<WindowsKeyEvent>
         VK_DIVIDE => Some(KeyCode::KeypadDivide),
         VK_DECIMAL => Some(KeyCode::KeypadPeriod),
         VK_SEPARATOR => Some(KeyCode::KeypadComma),
+        // The lock and system keys type no character, so without these they would produce no
+        // event at all. (Ctrl+Pause is Ctrl+Break, which the console treats as a signal.)
+        VK_PAUSE => Some(KeyCode::Pause),
+        VK_SCROLL => Some(KeyCode::ScrollLock),
+        VK_SNAPSHOT => Some(KeyCode::PrintScreen),
+        VK_CAPITAL => Some(KeyCode::CapsLock),
+        VK_APPS => Some(KeyCode::Menu),
+        VK_NUMLOCK => Some(KeyCode::NumLock),
         _ => {
             let utf16 = key_event.u_char;
             match utf16 {
@@ -351,7 +385,7 @@ fn parse_key_event_record(key_event: &KeyEventRecord) -> Option<WindowsKeyEvent>
         } else {
             KeyEventKind::Release
         };
-        let key_event = KeyEvent::new_with_kind(key_code, modifiers, kind);
+        let key_event = KeyEvent::new_with_kind_and_state(key_code, modifiers, kind, state);
         return Some(WindowsKeyEvent::KeyEvent(key_event));
     }
 
@@ -443,6 +477,7 @@ fn parse_mouse_event_record(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use winapi::um::wincon::SCROLLLOCK_ON;
 
     /// Windows rewrites the virtual-key code of numpad keys to their navigation twins
     /// when NumLock is off, and — regardless of NumLock — when Shift is held, because
@@ -502,5 +537,119 @@ mod tests {
         for vk in [VK_NUMPAD0, VK_NUMPAD5, VK_NUMPAD9, VK_ADD, VK_DECIMAL] {
             assert_eq!(numpad_keycode_from_navigation_vk(vk), None);
         }
+    }
+
+    /// A key event as the console reads it: `vk` pressed or released, typing no character,
+    /// with the control-key state `control_key_state`.
+    fn key_record(vk: i32, key_down: bool, control_key_state: u32) -> KeyEventRecord {
+        use crossterm_winapi::InputRecord;
+        use winapi::um::wincontypes::{INPUT_RECORD, KEY_EVENT};
+
+        let mut record: INPUT_RECORD = unsafe { std::mem::zeroed() };
+        record.EventType = KEY_EVENT;
+        let key = unsafe { record.Event.KeyEvent_mut() };
+        key.bKeyDown = i32::from(key_down);
+        key.wRepeatCount = 1;
+        key.wVirtualKeyCode = vk as u16;
+        key.dwControlKeyState = control_key_state;
+        match InputRecord::from(record) {
+            InputRecord::KeyEvent(key) => key,
+            _ => unreachable!("a KEY_EVENT record is a key event"),
+        }
+    }
+
+    /// The key event `record` parses to, if any.
+    fn parsed(record: &KeyEventRecord) -> Option<KeyEvent> {
+        match parse_key_event_record(record)? {
+            WindowsKeyEvent::KeyEvent(key_event) => Some(key_event),
+            WindowsKeyEvent::Surrogate(_) => None,
+        }
+    }
+
+    /// The lock and system keys type no character; each still arrives as its own key, pressed
+    /// and released.
+    #[test]
+    fn lock_and_system_keys_arrive_as_their_own_keys() {
+        let cases = [
+            (VK_PAUSE, KeyCode::Pause),
+            (VK_SCROLL, KeyCode::ScrollLock),
+            (VK_SNAPSHOT, KeyCode::PrintScreen),
+            (VK_CAPITAL, KeyCode::CapsLock),
+            (VK_APPS, KeyCode::Menu),
+            (VK_NUMLOCK, KeyCode::NumLock),
+        ];
+
+        for (vk, expected) in cases {
+            for (key_down, kind) in [(true, KeyEventKind::Press), (false, KeyEventKind::Release)] {
+                let event = parsed(&key_record(vk, key_down, 0));
+                assert_eq!(
+                    event.map(|event| (event.code, event.kind)),
+                    Some((expected, kind)),
+                    "virtual key {vk} should arrive as {expected:?}"
+                );
+            }
+        }
+    }
+
+    /// Menu is the application key, `VK_APPS`; `VK_MENU` is Alt, a modifier, and stays
+    /// without an event of its own.
+    #[test]
+    fn alt_is_not_the_menu_key() {
+        assert_eq!(parsed(&key_record(VK_MENU, true, LEFT_ALT_PRESSED)), None);
+    }
+
+    /// NumLock and CapsLock being on are reported on every key event of the console path,
+    /// as the kitty protocol reports them; ScrollLock and the rest of the state are not.
+    #[test]
+    fn num_lock_and_caps_lock_are_reported_in_the_state() {
+        let cases = [
+            (0, KeyEventState::empty()),
+            (NUMLOCK_ON, KeyEventState::NUM_LOCK),
+            (CAPSLOCK_ON, KeyEventState::CAPS_LOCK),
+            (
+                NUMLOCK_ON | CAPSLOCK_ON,
+                KeyEventState::NUM_LOCK | KeyEventState::CAPS_LOCK,
+            ),
+            (
+                NUMLOCK_ON | SCROLLLOCK_ON | SHIFT_PRESSED,
+                KeyEventState::NUM_LOCK,
+            ),
+        ];
+
+        for (control_key_state, expected) in cases {
+            // A numpad key from the main match, one recovered from its navigation twin, and
+            // a lock key itself.
+            for vk in [VK_NUMPAD8, VK_UP, VK_NUMLOCK] {
+                let event = parsed(&key_record(vk, true, control_key_state));
+                assert_eq!(
+                    event.map(|event| event.state),
+                    Some(expected),
+                    "virtual key {vk} with state {control_key_state:#x}"
+                );
+            }
+        }
+    }
+
+    /// With NumLock on, the numpad's 8 is `Keypad8` with `NUM_LOCK` set; off, the console
+    /// sends `VK_UP` without `ENHANCED_KEY`, recovered as `Keypad8` without it: the two can
+    /// be told apart.
+    #[test]
+    fn the_numpad_is_told_apart_by_num_lock() {
+        let on = parsed(&key_record(VK_NUMPAD8, true, NUMLOCK_ON));
+        let off = parsed(&key_record(VK_UP, true, 0));
+        assert_eq!(
+            on.map(|event| (event.code, event.state)),
+            Some((KeyCode::Keypad8, KeyEventState::NUM_LOCK))
+        );
+        assert_eq!(
+            off.map(|event| (event.code, event.state)),
+            Some((KeyCode::Keypad8, KeyEventState::empty()))
+        );
+        let arrow = parsed(&key_record(VK_UP, true, ENHANCED_KEY | NUMLOCK_ON));
+        assert_eq!(
+            arrow.map(|event| (event.code, event.state)),
+            Some((KeyCode::Up, KeyEventState::NUM_LOCK)),
+            "the arrow block's Up stays Up"
+        );
     }
 }
